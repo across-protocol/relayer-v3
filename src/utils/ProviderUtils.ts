@@ -11,7 +11,7 @@ import {
   PROVIDER_CACHE_TTL_MODIFIER as ttl_modifier,
   BLOCK_NUMBER_TTL,
 } from "../common";
-import { delay, getOriginFromURL, Logger } from "./";
+import { delay, Logger } from "./";
 import { compareResultsAndFilterIgnoredKeys } from "./ObjectUtils";
 
 const logger = Logger;
@@ -72,8 +72,14 @@ class RateLimitedProvider extends ethers.providers.StaticJsonRpcProvider {
 
 const defaultTimeout = 60 * 1000;
 
+// @dev To avoid accidentally leaking RPC keys in log messages, resolve the RPC provider hostname
+// centrally. There should be no instances of `provider.connection.url` in log messages or errors.
+function getProviderHostname(provider: ethers.providers.StaticJsonRpcProvider): string {
+  return new URL(provider.connection.url).hostname;
+}
+
 function formatProviderError(provider: ethers.providers.StaticJsonRpcProvider, rawErrorText: string) {
-  return `Provider ${provider.connection.url} failed with error: ${rawErrorText}`;
+  return `Provider ${getProviderHostname(provider)} failed with error: ${rawErrorText}`;
 }
 
 function createSendErrorWithMessage(message: string, sendError: any) {
@@ -128,7 +134,9 @@ class CacheProvider extends RateLimitedProvider {
     this.maxReorgDistance = CHAIN_CACHE_FOLLOW_DISTANCE[chainId];
 
     // Pre-compute as much of the redis key as possible.
-    const cachePrefix = `${providerCacheNamespace},${new URL(this.connection.url).hostname},${chainId}`;
+    // The full provider URL is deliberately used here, since the redis cache is considered sensitive,
+    // but additional caution is needed to ensure the cache prefix is not logged anywhere.
+    const cachePrefix = `${providerCacheNamespace},${getProviderHostname(this)},${chainId}`;
     this.getBlockByNumberPrefix = `${cachePrefix}:getBlockByNumber,`;
     this.getLogsCachePrefix = `${cachePrefix}:eth_getLogs,`;
     this.callCachePrefix = `${cachePrefix}:eth_call,`;
@@ -307,7 +315,10 @@ export class RetryProvider extends ethers.providers.StaticJsonRpcProvider {
     if (!results.every(isPromiseFulfilled)) {
       // Format the error so that it's very clear which providers failed and succeeded.
       const errorTexts = errors.map(([provider, errorText]) => formatProviderError(provider, errorText));
-      const successfulProviderUrls = results.filter(isPromiseFulfilled).map((result) => result.value[0].connection.url);
+      const successfulProviderUrls = results
+        .filter(isPromiseFulfilled)
+        .map(({ value }) => getProviderHostname(value[0]));
+
       throw createSendErrorWithMessage(
         `Not enough providers succeeded. Errors:\n${errorTexts.join("\n")}\n` +
           `Successful Providers:\n${successfulProviderUrls.join("\n")}`,
@@ -325,7 +336,7 @@ export class RetryProvider extends ethers.providers.StaticJsonRpcProvider {
 
     const throwQuorumError = () => {
       const errorTexts = errors.map(([provider, errorText]) => formatProviderError(provider, errorText));
-      const successfulProviderUrls = values.map(([provider]) => provider.connection.url);
+      const successfulProviderUrls = values.map(([provider]) => getProviderHostname(provider));
       throw new Error(
         "Not enough providers agreed to meet quorum.\n" +
           "Providers that errored:\n" +
@@ -391,11 +402,11 @@ export class RetryProvider extends ethers.providers.StaticJsonRpcProvider {
     const mismatchedProviders = Object.fromEntries(
       [...values, ...fallbackValues]
         .filter(([, result]) => !compareRpcResults(method, result, quorumResult))
-        .map(([provider, result]) => [provider.connection.url, result])
+        .map(([provider, result]) => [getProviderHostname(provider), result])
     );
     const quorumProviders = [...values, ...fallbackValues]
       .filter(([, result]) => compareRpcResults(method, result, quorumResult))
-      .map(([provider]) => provider.connection.url);
+      .map(([provider]) => getProviderHostname(provider));
     if (Object.keys(mismatchedProviders).length > 0 || errors.length > 0) {
       logger.warn({
         at: "ProviderUtils",
@@ -555,7 +566,7 @@ export async function getProvider(chainId: number, logger?: winston.Logger, useC
         logger.debug({
           at: "ProviderUtils#rpcRateLimited",
           message: `Got rate-limit (429) response on attempt ${attempt}.`,
-          rpc: getOriginFromURL(url),
+          rpc: getProviderHostname(url),
           retryAfter: `${delayMs} ms`,
           workers: nodeMaxConcurrency,
         });
