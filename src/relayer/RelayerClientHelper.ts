@@ -145,7 +145,6 @@ export async function constructRelayerClients(
     config.relayerMessageGasMultiplier,
     config.relayerGasPadding
   );
-  await profitClient.update();
 
   const monitoredAddresses = [signerAddr];
   const adapterManager = new AdapterManager(
@@ -188,29 +187,33 @@ export async function constructRelayerClients(
 
 export async function updateRelayerClients(clients: RelayerClients, config: RelayerConfig): Promise<void> {
   // SpokePoolClient client requires up to date HubPoolClient and ConfigStore client.
-  const { spokePoolClients } = clients;
+  const { acrossApiClient, inventoryClient, profitClient, spokePoolClients, tokenClient } = clients;
 
   // TODO: the code below can be refined by grouping with promise.all. however you need to consider the inter
   // dependencies of the clients. some clients need to be updated before others. when doing this refactor consider
   // having a "first run" update and then a "normal" update that considers this. see previous implementation here
   // https://github.com/across-protocol/relayer-v2/pull/37/files#r883371256 as a reference.
-  await updateSpokePoolClients(spokePoolClients, [
+  const spokePoolEvents = [
     "V3FundsDeposited",
     "RequestedSpeedUpV3Deposit",
     "FilledV3Relay",
     "RelayedRootBundle",
     "ExecutedRelayerRefundRoot",
-  ]);
+  ];
 
-  // Update the token client first so that inventory client has latest balances.
-  await clients.tokenClient.update();
+  // Start updates w/ no dependencies first, and wait on them last.
+  const profitClientUpdate = profitClient.update();
+  const inputTokenApprovals = config.sendingRelaysEnabled ? tokenClient.setOriginTokenApprovals() : Promise.resolve();
+  const apiClientUpdate = acrossApiClient.update(config.ignoreLimits);
 
-  // We can update the inventory client at the same time as checking for eth wrapping as these do not depend on each other.
+  // InventoryClient updates depend on the tokenClient and SpokePoolClients.
+  await Promise.all([clients.tokenClient.update(), updateSpokePoolClients(spokePoolClients, spokePoolEvents)]);
+
   await Promise.all([
-    clients.acrossApiClient.update(config.ignoreLimits),
-    clients.inventoryClient.update(),
-    clients.inventoryClient.wrapL2EthIfAboveThreshold(),
-    clients.inventoryClient.setL1TokenApprovals(),
-    config.sendingRelaysEnabled ? clients.tokenClient.setOriginTokenApprovals() : Promise.resolve(),
+    inventoryClient.update(),
+    inventoryClient.wrapL2EthIfAboveThreshold(),
+    inventoryClient.setL1TokenApprovals(), // Approve bridge contracts (if rebalancing enabled)
   ]);
+
+  await Promise.all([profitClientUpdate, inputTokenApprovals, apiClientUpdate]);
 }
