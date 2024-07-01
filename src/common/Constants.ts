@@ -1,4 +1,20 @@
-import { CHAIN_IDs, TOKEN_SYMBOLS_MAP, ethers } from "../utils";
+import { CHAIN_IDs, TOKEN_SYMBOLS_MAP, ethers, Signer, Provider } from "../utils";
+import {
+  BaseBridgeAdapter,
+  OpStackDefaultERC20Bridge,
+  SnxOptimismBridge,
+  DaiOptimismBridge,
+  UsdcTokenSplitterBridge,
+  OpStackWethBridge,
+  PolygonWethBridge,
+  PolygonERC20Bridge,
+  ZKSyncBridge,
+  ZKSyncWethBridge,
+  ArbitrumOneBridge,
+  LineaBridge,
+  LineaUSDCBridge,
+  LineaWethBridge,
+} from "../adapter/bridges";
 
 // Maximum supported version of the configuration loaded into the Across ConfigStore.
 // It protects bots from running outdated code against newer version of the on-chain config store.
@@ -293,6 +309,7 @@ export const chainIdsToCctpDomains: { [chainId: number]: number } = {
   [CHAIN_IDs.POLYGON_AMOY]: 7,
 };
 
+// A mapping of L2 chain IDs to an array of tokens Across supports on that chain.
 export const SUPPORTED_TOKENS: { [chainId: number]: string[] } = {
   [CHAIN_IDs.OPTIMISM]: ["DAI", "SNX", "BAL", "WETH", "USDC", "POOL", "USDT", "WBTC", "UMA", "ACX"],
   [CHAIN_IDs.POLYGON]: ["USDC", "USDT", "WETH", "DAI", "WBTC", "UMA", "BAL", "ACX", "POOL"],
@@ -327,6 +344,72 @@ export const TOKEN_APPROVALS_TO_FIRST_ZERO: Record<number, string[]> = {
   ],
 };
 
+// Map of chain IDs to all "canonical bridges" for the given chain. Canonical is loosely defined -- in this
+// case, it is the default bridge for the given chain.
+export const CANONICAL_BRIDGE: {
+  [chainId: number]: {
+    new (
+      l2chainId: number,
+      hubChainId: number,
+      l1Signer: Signer,
+      l2SignerOrProvider: Signer | Provider,
+      l1Token: string
+    ): BaseBridgeAdapter;
+  };
+} = {
+  10: OpStackDefaultERC20Bridge,
+  137: PolygonERC20Bridge,
+  324: ZKSyncBridge,
+  8453: OpStackDefaultERC20Bridge,
+  34443: OpStackDefaultERC20Bridge,
+  42161: ArbitrumOneBridge,
+  59144: LineaBridge,
+};
+
+// Custom Bridges are all bridges between chains which only support a small number (typically one) of tokens.
+// In addition to mapping a chain to the custom bridges, we also need to specify which token the bridge supports.
+export const CUSTOM_BRIDGE: {
+  [chainId: number]: {
+    [tokenAddress: string]: {
+      new (
+        l2chainId: number,
+        hubChainId: number,
+        l1Signer: Signer,
+        l2SignerOrProvider: Signer | Provider,
+        l1Token: string
+      ): BaseBridgeAdapter;
+    };
+  };
+} = {
+  10: {
+    [TOKEN_SYMBOLS_MAP.SNX.addresses[1]]: SnxOptimismBridge,
+    [TOKEN_SYMBOLS_MAP.DAI.addresses[1]]: DaiOptimismBridge,
+    [TOKEN_SYMBOLS_MAP.USDC.addresses[1]]: UsdcTokenSplitterBridge,
+    [TOKEN_SYMBOLS_MAP.WETH.addresses[1]]: OpStackWethBridge,
+  },
+  137: {
+    [TOKEN_SYMBOLS_MAP.WETH.addresses[1]]: PolygonWethBridge,
+    [TOKEN_SYMBOLS_MAP.USDC.addresses[1]]: UsdcTokenSplitterBridge,
+  },
+  324: {
+    [TOKEN_SYMBOLS_MAP.WETH.addresses[1]]: ZKSyncWethBridge,
+  },
+  8453: {
+    [TOKEN_SYMBOLS_MAP.USDC.addresses[1]]: UsdcTokenSplitterBridge,
+    [TOKEN_SYMBOLS_MAP.WETH.addresses[1]]: OpStackWethBridge,
+  },
+  34443: {
+    [TOKEN_SYMBOLS_MAP.WETH.addresses[1]]: OpStackWethBridge,
+  },
+  42161: {
+    [TOKEN_SYMBOLS_MAP.USDC.addresses[1]]: UsdcTokenSplitterBridge,
+  },
+  59144: {
+    [TOKEN_SYMBOLS_MAP.USDC.addresses[1]]: LineaUSDCBridge,
+    [TOKEN_SYMBOLS_MAP.WETH.addresses[1]]: LineaWethBridge,
+  },
+};
+
 // Path to the external SpokePool indexer. Must be updated if src/libexec/* files are relocated or if the `outputDir` on TSC has been modified.
 export const RELAYER_DEFAULT_SPOKEPOOL_INDEXER = "./dist/src/libexec/RelayerSpokePoolIndexer.js";
 
@@ -335,6 +418,25 @@ export const DEFAULT_ARWEAVE_GATEWAY = { url: "arweave.net", port: 443, protocol
 // Chains with slow (> 2 day liveness) canonical L2-->L1 bridges that we prioritize taking repayment on.
 // This does not include all  7-day withdrawal chains because we don't necessarily prefer being repaid on some of these 7-day chains, like Mode.
 export const SLOW_WITHDRAWAL_CHAINS = [CHAIN_IDs.BASE, CHAIN_IDs.ARBITRUM, CHAIN_IDs.OPTIMISM];
+
+export const CUSTOM_ARBITRUM_GATEWAYS: { [chainId: number]: { l1: string; l2: string } } = {
+  [TOKEN_SYMBOLS_MAP.USDT.addresses[CHAIN_IDs.MAINNET]]: {
+    l1: "0xcEe284F754E854890e311e3280b767F80797180d", // USDT
+    l2: "0x096760F208390250649E3e8763348E783AEF5562",
+  },
+  [TOKEN_SYMBOLS_MAP.USDC.addresses[CHAIN_IDs.MAINNET]]: {
+    l1: "0xcEe284F754E854890e311e3280b767F80797180d", // USDC
+    l2: "0x096760F208390250649E3e8763348E783AEF5562", // If we want to bridge to USDC.e, we need to specify a unique Arbitrum Gateway.
+  },
+  [TOKEN_SYMBOLS_MAP.WETH.addresses[CHAIN_IDs.MAINNET]]: {
+    l1: "0xd92023E9d9911199a6711321D1277285e6d4e2db", // WETH
+    l2: "0x6c411aD3E74De3E7Bd422b94A27770f5B86C623B",
+  },
+  [TOKEN_SYMBOLS_MAP.DAI.addresses[CHAIN_IDs.MAINNET]]: {
+    l1: "0xD3B5b60020504bc3489D6949d545893982BA3011", // DAI
+    l2: "0x467194771dAe2967Aef3ECbEDD3Bf9a310C76C65",
+  },
+};
 
 // Expected worst-case time for message from L1 to propogate to L2 in seconds
 export const EXPECTED_L1_TO_L2_MESSAGE_TIME = {
@@ -346,4 +448,10 @@ export const EXPECTED_L1_TO_L2_MESSAGE_TIME = {
   [CHAIN_IDs.LISK]: 20 * 60,
   [CHAIN_IDs.BASE]: 20 * 60,
   [CHAIN_IDs.MODE]: 20 * 60,
+};
+
+export const DEFAULT_GAS_MULTIPLIER: { [chainId: number]: number } = {
+  [CHAIN_IDs.OPTIMISM]: 1.5,
+  [CHAIN_IDs.BASE]: 1.5,
+  [CHAIN_IDs.MODE]: 1.5,
 };
