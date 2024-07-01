@@ -112,7 +112,6 @@ export class AdapterManager {
       at: "AdapterManager",
       message: `Getting outstandingCrossChainTransfers for ${chainId}`,
       adapterSupportedL1Tokens,
-      searchConfigs: adapter.getUpdatedSearchConfigs(),
     });
     return this.adapters[chainId].getOutstandingCrossChainTransfers(adapterSupportedL1Tokens);
   }
