@@ -90,6 +90,7 @@ describe("Dataworker: Load data used in all functions", async function () {
       bundleDepositsV3: {},
       expiredDepositsToRefundV3: {},
       bundleFillsV3: {},
+      bundleInvalidFillsV3: [],
       unexecutableSlowFills: {},
       bundleSlowFillsV3: {},
     });
