@@ -188,15 +188,15 @@ export class MultiCallerClient {
     });
 
     const txnRequestsToSubmit: AugmentedTransaction[] = [];
+    const txnRequestsToRebuild: AugmentedTransaction[] = [];
 
     // First try to simulate the transaction as a batch. If the full batch succeeded, then we don't
     // need to simulate transactions individually. If the batch failed, then we need to
     // simulate the transactions individually and pick out the successful ones.
-    const batchTxns: AugmentedTransaction[] = valueTxns.concat(
-      await this.buildMultiCallBundles(txns, this.chunkSize[chainId])
-    );
+    const bundledTxns = await this.buildMultiCallBundles(txns, this.chunkSize[chainId]);
+    const batchTxns: AugmentedTransaction[] = bundledTxns.concat(valueTxns);
     const batchSimResults = await this.txnClient.simulate(batchTxns);
-    const batchesAllSucceeded = batchSimResults.every(({ succeed, transaction, reason }, idx) => {
+    const batchesAllSucceeded = batchSimResults.every(({ succeed, transaction, reason, data }, idx) => {
       // If txn succeeded or the revert reason is known to be benign, then log at debug level.
       this.logger[
         succeed || simulate || this.canIgnoreRevertReason({ succeed, transaction, reason }) ? "debug" : "error"
@@ -206,12 +206,32 @@ export class MultiCallerClient {
         batchTxn: { ...transaction, contract: transaction.contract.address },
         reason,
       });
-      batchTxns[idx].gasLimit = succeed ? transaction.gasLimit : undefined;
+      if (transaction.method === "tryMulticall") {
+        const succeededTxnRequests: AugmentedTransaction[] = [];
+        data?.forEach(({ success }, subIdx) => {
+          if (success) {
+            const txnIdx = (this.chunkSize[chainId] ?? DEFAULT_MULTICALL_CHUNK_SIZE) * idx + subIdx;
+            succeededTxnRequests.push(txns[txnIdx]);
+          }
+        });
+        if (succeededTxnRequests.length != (data?.length ?? 0)) {
+          batchTxns.splice(idx, 1);
+          txnRequestsToRebuild.push(...succeededTxnRequests);
+        }
+      } else {
+        batchTxns[idx].gasLimit = succeed ? transaction.gasLimit : undefined;
+      }
       return succeed;
     });
 
     if (batchesAllSucceeded) {
-      txnRequestsToSubmit.push(...batchTxns);
+      if (txnRequestsToRebuild.length != 0) {
+        txnRequestsToSubmit.push(
+          ...batchTxns.concat(await this.buildMultiCallBundles(txnRequestsToRebuild, this.chunkSize[chainId]))
+        );
+      } else {
+        txnRequestsToSubmit.push(...batchTxns);
+      }
     } else {
       const individualTxnSimResults = await Promise.allSettled([
         this.simulateTransactionQueue(txns),
@@ -334,6 +354,9 @@ export class MultiCallerClient {
       // simulated. In this case, drop the aggregation and revert to undefined to force estimation on submission.
       gasLimit = isDefined(gasLimit) && isDefined(txn.gasLimit) ? gasLimit.add(txn.gasLimit) : undefined;
     });
+    const method = transactions.every((txn) => ["fillV3Relay", "requestV3SlowFill"].includes(txn.method))
+      ? "tryMulticall"
+      : "multicall";
 
     this.logger.debug({
       at: "MultiCallerClient",
@@ -346,7 +369,7 @@ export class MultiCallerClient {
     return {
       chainId,
       contract,
-      method: "multicall",
+      method,
       args: [callData],
       gasLimit,
       message: "Across multicall transaction",

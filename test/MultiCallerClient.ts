@@ -5,11 +5,22 @@ import {
   unknownRevertReason,
   unknownRevertReasonMethodsToIgnore,
   unknownRevertReasons,
+  MultiCallerClient,
 } from "../src/clients";
 import { bnOne, BigNumber, TransactionSimulationResult } from "../src/utils";
 import { MockedTransactionClient, txnClientPassResult } from "./mocks/MockTransactionClient";
-import { CHAIN_ID_TEST_LIST as chainIds } from "./constants";
-import { createSpyLogger, Contract, expect, randomAddress, winston, toBN, smock, assertPromiseError } from "./utils";
+import { CHAIN_ID_TEST_LIST as chainIds, originChainId, destinationChainId } from "./constants";
+import {
+  createSpyLogger,
+  Contract,
+  expect,
+  randomAddress,
+  winston,
+  toBN,
+  smock,
+  assertPromiseError,
+  deploySpokePoolWithToken,
+} from "./utils";
 import { MockedMultiCallerClient } from "./mocks/MockMultiCallerClient";
 
 class DummyMultiCallerClient extends MockedMultiCallerClient {
@@ -55,7 +66,7 @@ function encodeFunctionData(_method: string, args: ReadonlyArray<unknown> = []):
   return args.join(" ");
 }
 
-describe("MultiCallerClient", async function () {
+describe("MultiCallerClient - Base", async function () {
   const { spyLogger }: { spyLogger: winston.Logger } = createSpyLogger();
   const address = randomAddress(); // Test contract address
   let multiCaller: DummyMultiCallerClient;
@@ -601,5 +612,125 @@ describe("MultiCallerClient", async function () {
     expect(bundle[1].args[0][1].target).to.equal(secondAddress);
     expect(bundle[1].args[0][0].callData).to.equal(encodeFunctionData("test()", []));
     expect(bundle[1].args[0][1].callData).to.equal(encodeFunctionData("test2(uint256)", [11]));
+  });
+});
+
+describe("MultiCallerClient - Contract Sim", async function () {
+  const { spyLogger }: { spyLogger: winston.Logger } = createSpyLogger();
+  let address; // Address for a test Ethereum spoke pool.
+
+  let spokePool_1: Contract, erc20_1: Contract;
+
+  let multiCaller: MultiCallerClient;
+  let depositor, relayer;
+
+  let inputToken: string;
+  let inputAmount: BigNumber;
+
+  beforeEach(async function () {
+    multiCaller = new MultiCallerClient(spyLogger);
+    [depositor, relayer] = await ethers.getSigners();
+    ({ spokePool: spokePool_1, erc20: erc20_1 } = await deploySpokePoolWithToken(originChainId, destinationChainId));
+    expect(multiCaller.transactionCount()).to.equal(0);
+
+    address = spokePool_1.address;
+    inputToken = erc20_1.address;
+    erc20_1.mint(relayer.address, ethers.utils.parseEther("10000"));
+    erc20_1.connect(relayer).approve(spokePool_1.address, ethers.utils.parseEther("100000000"));
+    erc20_1.mint(depositor.address, ethers.utils.parseEther("10000"));
+    erc20_1.connect(depositor).approve(spokePool_1.address, ethers.utils.parseEther("100000000"));
+    // await setupTokensForWallet(spokePool_1, depositor, [erc20_1], weth, 10);
+    inputAmount = await erc20_1.balanceOf(depositor.address);
+  });
+
+  it("Correctly uses tryMulticall when only calling relayer functions", async function () {
+    const spokePoolMethods = ["fillV3Relay", "requestV3SlowFill"];
+    const chainId = chainIds[0];
+    const multicallTxns: AugmentedTransaction[] = [];
+    for (const spokePoolMethod of spokePoolMethods) {
+      const sampleTxn: AugmentedTransaction = {
+        chainId,
+        contract: {
+          address,
+          interface: { encodeFunctionData },
+          multicall: 1,
+        } as unknown as Contract,
+        method: spokePoolMethod,
+        args: [],
+        message: "",
+        mrkdwn: "",
+      };
+      multicallTxns.push(sampleTxn);
+    }
+    const txnQueue: AugmentedTransaction[] = await multiCaller.buildMultiCallBundles(multicallTxns);
+    txnQueue.forEach(({ method }) => expect(method).to.equal("tryMulticall"));
+  });
+
+  it("Correctly uses multicall when using even a single non-relayer function", async function () {
+    const spokePoolMethods = ["fillV3Relay", "requestV3SlowFill", "test"];
+    const chainId = chainIds[0];
+    const multicallTxns: AugmentedTransaction[] = [];
+    for (const spokePoolMethod of spokePoolMethods) {
+      const sampleTxn: AugmentedTransaction = {
+        chainId,
+        contract: {
+          address,
+          interface: { encodeFunctionData },
+          multicall: 1,
+        } as unknown as Contract,
+        method: spokePoolMethod,
+        args: [],
+        message: "",
+        mrkdwn: "",
+      };
+      multicallTxns.push(sampleTxn);
+    }
+    const txnQueue: AugmentedTransaction[] = await multiCaller.buildMultiCallBundles(multicallTxns);
+    txnQueue.forEach(({ method }) => expect(method).to.equal("multicall"));
+  });
+
+  it("Defaults to tryMulticall for simulation and rejects failed transactions", async function () {
+    const nTxns = 10;
+
+    const successfulTransactions = [];
+    for (let txn = 1; txn <= nTxns; ++txn) {
+      const currentTime = Number(await spokePool_1.getCurrentTime());
+      const exclusivityDeadline = txn % 2 == 1 ? currentTime - 50 : currentTime + 1000;
+      const relayData = {
+        depositor: depositor.address,
+        recipient: depositor.address,
+        exclusiveRelayer: relayer.address,
+        inputToken: inputToken,
+        outputToken: inputToken,
+        inputAmount: inputAmount,
+        outputAmount: inputAmount,
+        originChainId: originChainId,
+        depositId: txn,
+        fillDeadline: currentTime + 1000,
+        exclusivityDeadline,
+        message: "0x",
+      };
+      const chainId = Number(destinationChainId);
+      const txnRequest: AugmentedTransaction = {
+        chainId,
+        contract: spokePool_1,
+        method: "fillV3Relay",
+        args: [relayData, destinationChainId],
+        message: "",
+        mrkdwn: "",
+      };
+      multiCaller.enqueueTransaction(txnRequest);
+      if (txn % 2 == 1) {
+        successfulTransactions.push(
+          spokePool_1.interface.encodeFunctionData("fillV3Relay", [relayData, destinationChainId])
+        );
+      }
+    }
+    const tx = await multiCaller.executeTransactionQueue();
+
+    // There is just one bundle
+    const receipt = await ethers.provider.getTransaction(tx[0]);
+    const expectedReceiptData = spokePool_1.interface.encodeFunctionData("tryMulticall", [successfulTransactions]);
+    expect(expectedReceiptData).to.eq(receipt.data);
   });
 });
